@@ -13,8 +13,10 @@ firebase_admin.initialize_app(cred)
 db = firestore.client()
 call_collection = db.collection("Call")
 
+# TOPIC
+APP = "THELEE"
+
 # MQTT 설정
-DEVICE_ID = "TC1"
 BROKER = "BROKER"
 PORT = 1883
 KEEP_ALIVE_INTERVAL = 60
@@ -79,38 +81,80 @@ def on_mqtt_message(client, userdata, message):
 
     try:
         payload = json.loads(message.payload)
+        topic_parts = message.topic.split("/")
 
-        # 센서 데이터
-        if message.topic.startswith(f"THELEE/sensor/{DEVICE_ID}/response/data"):
-            process_sensor_data(payload, message.topic)
+        if len(topic_parts) < 4:
+            raise ValueError("Unexcepted Topic Structure")
 
-        # 쓰레기 input 데이터
-        elif message.topic.startswith(f"THELEE/sensor/{DEVICE_ID}/response/event"):
-            process_event_data(payload)
+        TARGET_TYPE = topic_parts[1]
+        DEVICE_ID = topic_parts[2]
+        MSG_TYPE = topic_parts[3]
 
-        # jetson 도착 여부
-        elif message.topic.startswith(f"THELEE/jetson/{DEVICE_ID}/response/command"):
-            if payload.get("response", {}).get("details", {}).get("status") == "arrived":
-                print("Robot arrived, resetting goal_sent status.")
-                goal_sent = False
-                last_sent_time = 0
-        
-        elif message.topic == "THELEE/web/admin/response/command":
-            command_type = payload.get("command", {}).get("type", "")
-            if command_type == "return":
-                send_jetson_allocate("0")
+        print(f"\nRECEIVED TOPIC: {message.topic}")
+
+        match TARGET_TYPE:
+            case "sensor":
+                handle_sensor_message(DEVICE_ID, MSG_TYPE, payload, message.topic)
+            case "jetson":
+                handle_jetson_message(DEVICE_ID, MSG_TYPE, payload)
+            case "web":
+                handle_web_message(DEVICE_ID, MSG_TYPE, payload)
+            case _:
+                print(f"Unknown sender type: {TARGET_TYPE}")
 
     except Exception as e:
         print(f"메시지 처리 오류: {e}")
 
+def handle_sensor_message(device_id, msg_type, payload, topic):
+    if "/data" in topic:
+        process_sensor_data(payload, topic)
+    elif "/event" in topic:
+        process_event_data(payload)
+    else:
+        print(f"Unhandled sensor message type: {msg_type}")
+
+def handle_jetson_message(device_id, msg_type, payload):
+    if msg_type == "response":
+        handle_jetson_command(payload)
+    else:
+        print(f"Unhandled jetson message type: {msg_type}")
+
+def handle_web_message(device_id, msg_type, payload):
+    if msg_type == "response":
+        handle_web_command(payload)
+    else:
+        print(f"Unhandled web message type: {msg_type}")
+
+def handle_jetson_command(data):
+    global goal_sent, last_sent_time
+    if data.get("response", {}).get("details", {}).get("status") == "arrived":
+        print("Robot arrived, resetting goal_sent status.")
+        goal_sent = False
+        last_sent_time = 0
+
+def handle_web_command(data):
+    command_type = data.get("command", {}).get("type", "")
+    if command_type == "return":
+        send_jetson_allocate("0")
+
+def transform_publish_topic(topic):
+    topic_mappings = {
+        "sensor": "web",
+        "TC1": "admin", # 나중에 추가될 수도?
+        "response": "transmit"
+    }
+
+    topic_parts = topic.split("/")
+    return "/".join([topic_mappings.get(part, part) for part in topic_parts])
+
 # 초음파 및 악취 센서 데이터 처리
 def process_sensor_data(data, topic):
-    # print("PROCESS SENSOR DATA")
     global goal_sent, last_sent_time
 
     # ~/data 이후 부분 추출
-    publish_topic = topic.replace("sensor", "web", 1).replace("TC1", "admin", 1).replace("response", "transmit", 1)
-    print(f"process_sensor_data - publish_topic: {publish_topic}")
+    # publish_topic = topic.replace("sensor", "web", 1).replace("TC1", "admin", 1).replace("response", "transmit", 1)
+    publish_topic = transform_publish_topic(topic)
+    print(f"publish_topic: {publish_topic}")
 
     store_sensor_data(data)
     # sensor 데이터만 추출
@@ -177,10 +221,7 @@ def store_sensor_data(data):
     
     latest_sensor_data["trash"] = data.get("trash", latest_sensor_data["trash"])
 
-
-    # print(f"최신 데이터 저장 완료: {latest_sensor_data}")
     
-
 # 이벤트 데이터 처리 함수
 def process_event_data(data):
     global latest_sensor_data
@@ -199,7 +240,6 @@ def process_event_data(data):
         publish_topic = "THELEE/web/admin/transmit/event"
         mqtt_client.publish(publish_topic, json.dumps(full_data), qos=1)
         print(f"web으로 event data 전송 완료: {publish_topic}")
-        
         
 
 
